@@ -588,6 +588,18 @@ fn test_ser_enum() {
     let expected = JsValue::Object(map);
     assert_eq!(to_js_value(&s).unwrap(), expected);
 }
+
+#[test]
+fn test_ser_date() {
+    use chrono::{DateTime, Utc};
+    #[derive(Serialize)]
+    struct TestStruct(u32, JsValueDate);
+
+    let now = Utc::now();
+    let js_value = to_js_value(&TestStruct(1, JsValueDate(now))).unwrap();
+    let expected = JsValue::Array(vec![JsValue::Int(1), JsValue::Date(now)]);
+    assert_eq!(js_value, expected);
+}
 // }}}
 // }}}
 
@@ -940,7 +952,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                     _ => unreachable!(),
                 };
                 self.pending_value
-                    .push(PendingValue::JsValue(dbg!(js_value)));
+                    .push(PendingValue::JsValue(js_value));
                 let result = visitor.visit_enum(&mut *self);
                 self.pending_value.pop();
                 result
@@ -1034,7 +1046,15 @@ impl<'de, 'a> MapAccess<'de> for NestedAccess<'a, 'de> {
     {
         let map = match self.de.pending_value.last() {
             Some(PendingValue::JsValue(JsValue::Object(map))) => map,
-            _ => return Err(Error::Message("Expected JsValue::Object".into())),
+            _ => {
+                return Err(Error::Message(
+                    format!(
+                        "Expected JsValue::Object, got {:?}",
+                        self.de.pending_value.last()
+                    )
+                    .into(),
+                ))
+            }
         };
         let iter = match self.hash_iter.as_mut() {
             Some(i) => i,
@@ -1235,5 +1255,91 @@ fn test_de_enum() {
     assert_eq!(expected, from_js_value(&j).unwrap());
 }
 // }}}
+
+#[test]
+#[cfg(feature = "chrono")]
+fn test_de_date() {
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct TestStruct(u32, JsValueDate);
+    let now = chrono::Utc::now();
+    let now_ts =
+        (now.timestamp() as f64) + (now.timestamp_subsec_nanos() as f64) / 1_000_000_000f64;
+    let js_value = JsValue::Array(vec![JsValue::Int(1), JsValue::Float(now_ts)]);
+
+    let value: TestStruct = from_js_value(&js_value).unwrap();
+    assert_eq!(value, TestStruct(1, now.into()));
+}
 // }}}
+// }}}
+
+// JsValueDate {{{
+#[cfg(feature = "chrono")]
+#[derive(PartialEq, Debug)]
+pub struct JsValueDate(chrono::DateTime<chrono::Utc>);
+
+#[cfg(feature = "chrono")]
+impl From<chrono::DateTime<chrono::Utc>> for JsValueDate {
+    fn from(val: chrono::DateTime<chrono::Utc>) -> Self {
+        JsValueDate(val)
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl std::ops::Deref for JsValueDate {
+    type Target = chrono::DateTime<chrono::Utc>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[cfg(feature = "chrono")]
+impl std::ops::DerefMut for JsValueDate {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl Serialize for JsValueDate {
+    fn serialize<S>(&self, ser: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let n = (self.0.timestamp() as f64)
+            + (self.0.timestamp_subsec_nanos() as f64) / 1_000_000_000f64;
+        ser.serialize_f64(n)
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl<'de> Deserialize<'de> for JsValueDate {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+
+        struct JsValueDateVisitor;
+
+        impl<'de> Visitor<'de> for JsValueDateVisitor {
+            type Value = JsValueDate;
+            fn expecting(
+                &self,
+                f: &mut std::fmt::Formatter,
+            ) -> std::result::Result<(), std::fmt::Error> {
+                f.write_str("a float")
+            }
+
+            fn visit_f64<E>(self, n: f64) -> std::result::Result<Self::Value, E> {
+                let seconds = n.trunc() as i64;
+                let sub_seconds = (n.fract() * 1_000_000_000f64).trunc() as u32;
+                let dt = DateTime::<Utc>::from_utc(
+                    NaiveDateTime::from_timestamp(seconds, sub_seconds),
+                    Utc,
+                );
+                Ok(JsValueDate(dt))
+            }
+        }
+        deserializer.deserialize_f64(JsValueDateVisitor)
+    }
+}
 // }}}
